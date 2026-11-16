@@ -1,0 +1,39 @@
+name: Check Devil Among Us 2.3.0
+
+on: workflow_dispatch
+
+permissions: {}
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Download and inspect the Windows build
+        shell: bash
+        run: |
+          set -euo pipefail
+          api=https://gamejolt.com/site-api/web/discover/games
+          curl -fsSL --retry 2 "$api/overview/364480" -o overview.json
+
+          build_id=$(jq -er '
+            .payload
+            | [.releases[] | select(.version_number == "2.3.0") | .id | tostring] as $releases
+            | [.builds[]
+               | select(.type == "downloadable")
+               | select((.game_release_id | tostring) as $id | $releases | index($id))
+               | select(.os_windows_64 == true or .os_windows == true)]
+            | sort_by(if .os_windows_64 == true then 0 else 1 end)
+            | .[0].id // error("Windows build 2.3.0 not found")
+          ' overview.json)
+
+          archive_url=$(curl -fsSL \
+            -H 'Content-Type: application/json' \
+            -d '{"forceDownload":true}' \
+            "$api/builds/get-download-url/$build_id" | jq -er '.payload.url')
+
+          curl -fsSL --retry 2 --proto '=https' --proto-redir '=https' \
+            "$archive_url" -o devil-among-us.archive
+          7z l devil-among-us.archive > archive-list.txt
+          grep -Ei 'Assembly-CSharp|GameAssembly|MonoBleedingEdge|globalgamemanagers|UnityPlayer|ProjectVersion' \
+            archive-list.txt || sed -n '1,80p' archive-list.txt
