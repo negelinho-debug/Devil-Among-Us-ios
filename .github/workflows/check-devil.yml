@@ -7,33 +7,64 @@ permissions: {}
 jobs:
   inspect:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - name: Download and inspect the Windows build
+      - name: Download and inspect version 2.3.0
         shell: bash
         run: |
           set -euo pipefail
           api=https://gamejolt.com/site-api/web/discover/games
+
+          cat > select-build.cjs <<'JS'
+          const fs = require('node:fs');
+
+          function selectBuild(data) {
+            const releases = new Map((data.releases ?? []).map(
+              r => [String(r.id), String(r.version_number).trim()]
+            ));
+            const rows = (data.builds ?? []).map(b => ({
+              id: String(b.id),
+              version: releases.get(String(b.game_release_id)) ?? '?',
+              type: b.type,
+              windows64: [true, 1, '1', 'true'].includes(b.os_windows_64),
+              windows: [true, 1, '1', 'true'].includes(b.os_windows),
+              file: b.primary_file?.filename ?? ''
+            }));
+
+            const candidates = rows.filter(b =>
+              /^v?2\.3(?:\.0)?$/i.test(b.version) &&
+              b.type === 'downloadable' && /^\d+$/.test(b.id));
+            const windows = candidates.filter(b => b.windows64 || b.windows);
+            const eligible = windows.length ? windows : candidates;
+            const archives = eligible.filter(b => /\.(zip|rar|7z)$/i.test(b.file));
+            const preferred = archives.length ? archives : eligible;
+            const x64 = preferred.filter(b => b.windows64);
+            const result = x64.length ? x64 : preferred;
+            return { rows, build: result.length === 1 ? result[0] : undefined };
+          }
+
+          const data = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const { rows, build } = selectBuild(data.payload ?? data);
+          console.error(JSON.stringify(rows, null, 2));
+          if (!build) process.exit(1);
+          console.log(build.id);
+          JS
+
           curl -fsSL --retry 2 "$api/overview/364480" -o overview.json
+          if ! build_id=$(node select-build.cjs overview.json); then
+            curl -fsSL --retry 2 "$api/packages/364480" -o packages.json
+            build_id=$(node select-build.cjs packages.json)
+          fi
+          echo "Game Jolt build: $build_id"
 
-          build_id=$(jq -er '
-            .payload
-            | [.releases[] | select(.version_number == "2.3.0") | .id | tostring] as $releases
-            | [.builds[]
-               | select(.type == "downloadable")
-               | select((.game_release_id | tostring) as $id | $releases | index($id))
-               | select(.os_windows_64 == true or .os_windows == true)]
-            | sort_by(if .os_windows_64 == true then 0 else 1 end)
-            | .[0].id // error("Windows build 2.3.0 not found")
-          ' overview.json)
-
-          archive_url=$(curl -fsSL \
-            -H 'Content-Type: application/json' \
-            -d '{"forceDownload":true}' \
+          archive_url=$(curl -fsSL --retry 2 -c cookies.txt \
+            -H 'Content-Type: application/json' -d '{"forceDownload":true}' \
             "$api/builds/get-download-url/$build_id" | jq -er '.payload.url')
-
-          curl -fsSL --retry 2 --proto '=https' --proto-redir '=https' \
+          curl -fsSL --retry 2 -b cookies.txt --proto '=https' --proto-redir '=https' \
             "$archive_url" -o devil-among-us.archive
+
+          file devil-among-us.archive
+          du -h devil-among-us.archive
           7z l devil-among-us.archive > archive-list.txt
-          grep -Ei 'Assembly-CSharp|GameAssembly|MonoBleedingEdge|globalgamemanagers|UnityPlayer|ProjectVersion' \
-            archive-list.txt || sed -n '1,80p' archive-list.txt
+          grep -Ei 'Assembly-CSharp|GameAssembly|MonoBleedingEdge|globalgamemanagers|UnityPlayer|ProjectVersion|StreamingAssets|localiz' \
+            archive-list.txt || sed -n '1,70p' archive-list.txt
