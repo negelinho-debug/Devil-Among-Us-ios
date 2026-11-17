@@ -13,58 +13,46 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          api=https://gamejolt.com/site-api/web/discover/games
+          page='https://www.mediafire.com/file/tyepiabex5stqkw/STTDAU+V2.3.rar/file'
+          curl -fsSL --retry 2 --proto '=https' --proto-redir '=https' "$page" -o mediafire.html
 
-          cat > select-build.cjs <<'JS'
-          const fs = require('node:fs');
+          archive_url=$(python3 - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          from urllib.parse import urlsplit
 
-          function selectBuild(data) {
-            const releases = new Map((data.releases ?? []).map(
-              r => [String(r.id), String(r.version_number).trim()]
-            ));
-            const rows = (data.builds ?? []).map(b => ({
-              id: String(b.id),
-              version: releases.get(String(b.game_release_id)) ?? '?',
-              type: b.type,
-              windows64: [true, 1, '1', 'true'].includes(b.os_windows_64),
-              windows: [true, 1, '1', 'true'].includes(b.os_windows),
-              file: b.primary_file?.filename ?? ''
-            }));
+          class DownloadLink(HTMLParser):
+              url = ""
 
-            const candidates = rows.filter(b =>
-              /^v?2\.3(?:\.0)?$/i.test(b.version) &&
-              b.type === 'downloadable' && /^\d+$/.test(b.id));
-            const windows = candidates.filter(b => b.windows64 || b.windows);
-            const eligible = windows.length ? windows : candidates;
-            const archives = eligible.filter(b => /\.(zip|rar|7z)$/i.test(b.file));
-            const preferred = archives.length ? archives : eligible;
-            const x64 = preferred.filter(b => b.windows64);
-            const result = x64.length ? x64 : preferred;
-            return { rows, build: result.length === 1 ? result[0] : undefined };
-          }
+              def handle_starttag(self, tag, attributes):
+                  attrs = dict(attributes)
+                  if tag == "a" and attrs.get("id") == "downloadButton":
+                      self.url = attrs.get("href") or ""
 
-          const data = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
-          const { rows, build } = selectBuild(data.payload ?? data);
-          console.error(JSON.stringify(rows, null, 2));
-          if (!build) process.exit(1);
-          console.log(build.id);
-          JS
+          parser = DownloadLink()
+          parser.feed(Path("mediafire.html").read_text(encoding="utf-8", errors="replace"))
+          url = urlsplit(parser.url)
+          host = url.hostname or ""
+          if url.scheme != "https" or not (host == "mediafire.com" or host.endswith(".mediafire.com")):
+              raise SystemExit("MediaFire did not provide a direct HTTPS download link.")
+          print(parser.url)
+          PY
+          )
 
-          curl -fsSL --retry 2 "$api/overview/364480" -o overview.json
-          if ! build_id=$(node select-build.cjs overview.json); then
-            curl -fsSL --retry 2 "$api/packages/364480" -o packages.json
-            build_id=$(node select-build.cjs packages.json)
-          fi
-          echo "Game Jolt build: $build_id"
+          archive="devil-among-us-2.3.rar"
+          curl -fsSL --retry 2 --proto '=https' --proto-redir '=https' "$archive_url" -o "$archive"
 
-          archive_url=$(curl -fsSL --retry 2 -c cookies.txt \
-            -H 'Content-Type: application/json' -d '{"forceDownload":true}' \
-            "$api/builds/get-download-url/$build_id" | jq -er '.payload.url')
-          curl -fsSL --retry 2 -b cookies.txt --proto '=https' --proto-redir '=https' \
-            "$archive_url" -o devil-among-us.archive
+          python3 - "$archive" <<'PY'
+          import sys
 
-          file devil-among-us.archive
-          du -h devil-among-us.archive
-          7z l devil-among-us.archive > archive-list.txt
+          with open(sys.argv[1], "rb") as archive:
+              header = archive.read(8)
+          if not header.startswith((b"Rar!\x1a\x07\x00", b"Rar!\x1a\x07\x01\x00")):
+              raise SystemExit("The download is not a RAR archive. MediaFire may have served an HTML page.")
+          PY
+
+          file "$archive"
+          du -h "$archive"
+          7z l "$archive" > archive-list.txt
           grep -Ei 'Assembly-CSharp|GameAssembly|MonoBleedingEdge|globalgamemanagers|UnityPlayer|ProjectVersion|StreamingAssets|localiz' \
             archive-list.txt || sed -n '1,70p' archive-list.txt
